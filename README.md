@@ -1,6 +1,6 @@
 # spqrp
 
-[![License: GPL-3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![License: GPL-3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0.html)
 
 **Sample Provenance Quality Resolver in Proteomics** — native R port of
 the [Python `spqrp` package](https://github.com/fhradilak/spqrp).
