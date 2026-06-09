@@ -1,0 +1,6 @@
+bibentry(
+  bibtype = "Misc",
+  title   = "SPQRP: Sample Provenance Quality Resolver in Proteomics — Addressing Sample Mix-Ups in Large-Scale Proteomics",
+  year    = "2026",
+  note    = "Manuscript in preparation"
+)

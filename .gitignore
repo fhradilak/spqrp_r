@@ -1,0 +1,12 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+.positai
+.RData
+.Rhistory
+
+# R build artifacts
+*.Rcheck/
+*.tar.gz
+Rplots.pdf

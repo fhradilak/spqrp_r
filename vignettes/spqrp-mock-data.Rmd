@@ -1,0 +1,225 @@
+---
+title: "spqrp on mock data"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{spqrp on mock data}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.width = 7, fig.height = 5
+)
+```
+
+This vignette mirrors `Example_Mock_Data.Rmd` from the Python package, but
+uses the native R package. No Python install is required.
+
+## Load data
+
+The package ships a small mock cohort and a matching protein ranking, both
+in long format with the required columns (`Sample_ID`, `Patient_ID`,
+`Protein`, `Intensity`).
+
+```{r, message = FALSE}
+library(spqrp)
+
+df      <- spqrp_example_data("input_cohort_df")
+ranking <- spqrp_example_data("protein_ranking")
+
+head(df)
+ranking
+```
+
+## Run clustering
+
+`run_clustering()` builds a kNN graph in a 2D embedding (PCA / MDS / UMAP),
+iteratively splits oversized components, and visualises the result.
+
+Use `n_neighbors = expected_samples_per_patient - 1` and
+`max_component_size = expected_samples_per_patient` for the typical case
+where every patient should appear in their own small cluster.
+
+```{r}
+res <- run_clustering(
+  df = df, ranking = ranking,
+  n_neighbors = 1L,
+  max_component_size = 2L,
+  metric = "manhattan",
+  method = "PCA",  # switch to "UMAP" once a cohort is large enough
+  plot_name = "Mock ranking on Mock data",
+  #quiet = FALSE.
+  #save_path = Mock_data_clustering.png
+)
+```
+It is recommended to specify 'save_path' to save the clustering with a better visualization with less cramped clusters (adjustable figsize and dpi).
+The plot in `res$plot` is a ggplot2 object — you can save or modify it like
+any other ggplot. Cluster bookkeeping is also returned as plain R lists:
+
+```{r}
+head(res$cluster_assignments, 8)
+res$uncertain_samples
+res$error_candidate_samples
+res$plot
+res$transitive_results
+```
+
+* `cluster_assignments` — named integer vector mapping sample → cluster ID
+* `uncertain_samples` — samples that should have a same-patient match in
+  the cohort but ended up isolated
+* `error_candidate_samples` — samples connected to a *different*-patient
+  neighbour (i.e. probable mix-ups)
+  
+## Threshold-based evaluation
+
+`perform_distance_evaluation_on_ranked_proteins()` computes pairwise
+distances on the top-`n` ranked proteins, picks a cutoff at the `p`-th
+percentile, and reports classification metrics against the patient ID
+ground truth.
+
+```{r}
+result <- perform_distance_evaluation_on_ranked_proteins(
+  df = df,
+  top_importance_df = ranking,
+  metric = "manhattan",
+  p = 0.989,
+  n = 4L,
+)
+result$cutoff
+result$eval_metrics[c("TP", "FP", "FN", "TN", "Precision", "Sensitivity", "F1")]
+result$plot 
+```
+
+## Compute your own protein ranking
+
+If you don't have a precomputed ranking, train a pairwise random-forest
+classifier on the raw data. Three balancing strategies are available via
+`classifier_backend`; the differences are documented at
+<https://github.com/fhradilak/spqrp_r/blob/main/articles/numerical-divergence.md>.
+
+**Avoid applying preprocessing or filtering steps to the data frame you
+pass in.** Anything that uses cohort-wide information — median
+normalization, occurrence filtering, outlier detection on the full
+cohort — leaks the held-out fold into the training fold and inflates
+the importance estimates. The built-in `outlier_removal = TRUE` option
+is safe: it fits the isolation forest inside each train/test split
+rather than on the whole cohort.
+
+```{r}
+results <- train_with_normalise(
+  df,
+  plate_corrected   = FALSE,  # mock data has no plate column
+  outlier_removal   = FALSE   # skip on tiny data
+  # classifier_backend defaults to "randomForest" — closest to imblearn's
+  # BalancedRandomForestClassifier. Pass "ranger" for a faster (but more
+  # divergent from original Python package) backend.
+)
+
+new_ranking <- retrieve_ranking(results)
+new_ranking
+```
+## Filtering (optional)
+
+Isolation-forest-based outlier detection flags samples whose protein
+profiles look anomalous relative to the rest of the cohort. Skip it on
+very small cohorts (the algorithm has little to learn from < ~30
+samples) — it's mostly useful at production scale where one mis-pipetted
+sample can drag clustering off course.
+
+```{r}
+# Drop flagged samples in one step:
+filtered <- remove_outlier_samples(df, contamination = "auto")
+
+filtered$outlier_list      # samples flagged as anomalous
+filtered$anomaly_df        # per-sample anomaly scores
+head(filtered$df)          # input df minus the flagged samples
+```
+
+```{r, eval = FALSE} 
+#Inspect the score distribution before deciding on a cutoff:
+filtered$anomaly_plot
+
+# Or call the underlying detector directly to keep the original df and
+# only act on the flag list — useful when you want to surface candidates
+# without auto-removing them:
+forest <- by_isolation_forest(df, impute_median = TRUE,
+                               contamination = 0.05)  # top 5% by score
+forest$outlier_list
+```
+
+`contamination = "auto"` uses an anomaly-score cutoff calibrated for
+`solitude` (the underlying engine; see `?by_isolation_forest` for why
+the default is `0.6` rather than sklearn's `0.5`). Pass a numeric
+fraction like `contamination = 0.1` to flag a fixed percentile instead.
+
+`train_with_normalise()` also runs the same filter internally via
+`outlier_removal = TRUE` (default), so you don't need to call this
+explicitly before training for creating the protein ranking — only when you want to inspect or
+pre-filter the cohort (e.g. for the clustering or threshold approach) yourself.
+
+## The complete SQRP pipeline:
+
+SPQRP consists of six main steps: preprocessing, protein selection with a Balanced Random Forest Classifier (BRF-Classifier), distance calculation, clustering-based classification, threshold-based classification, and performance calculation.
+The full SPQRP R packages functions can be used to run them in three stages: (1) preprocessing,
+(2) protein ranking via `train_with_normalise()`, and (3) clustering
+plus threshold-based evaluation on the filtered cohort (including, distance calculation, clustering- or respectively threshold-based classification, and performance calculation in one function). To follow it end-to-end, feed the `new_ranking` and (optionally) filtered data
+frame from stages 1–2 into `run_clustering()` and
+`perform_distance_evaluation_on_ranked_proteins()`:
+
+```{r}
+res <- run_clustering(
+  df = filtered$df, ranking = new_ranking,
+  n_neighbors = 1L,
+  max_component_size = 2L,
+  metric = "manhattan",
+  method = "PCA",  # switch to "UMAP" once a cohort is large enough
+  plot_name = "Mock ranking on Mock data",
+  #quiet = FALSE.
+  #save_path = filtered_mock_data_clustering.png
+)
+
+head(res$cluster_assignments, 8)
+res$uncertain_samples
+res$error_candidate_samples
+res$plot
+```
+
+```{r}
+result <- perform_distance_evaluation_on_ranked_proteins(
+  df = filtered$df,
+  top_importance_df = new_ranking,
+  metric = "manhattan",
+  p = 0.989,
+  n = 4L,
+)
+result$cutoff
+result$eval_metrics[c("TP", "FP", "FN", "TN", "Precision", "Sensitivity", "F1")]
+result$plot 
+```
+
+## Preprocessing (optional)
+
+The package mirrors the Python preprocessing pipeline. None of these
+steps are required for clustering — they're convenience helpers if you
+want to start from raw intensities.
+
+```{r, eval = FALSE}
+df_raw <- spqrp_example_data("input_cohort_df")
+
+# Zeros become NA so missingness is explicit
+df_raw$Intensity[df_raw$Intensity == 0] <- NA
+
+df_pp <- df_raw |>
+  log_transform() |>
+  filter_by_occurrence(0.7)
+
+# Per-sample median normalization (returns list(data, plot))
+norm <- normalize_medianintensity(df_pp, plot = FALSE)
+df_pp <- norm$data
+
+# Plate-effect residualisation if a `plate` column exists
+df_pp <- plate_correct_residuals_by_protein(df_pp)
+```
